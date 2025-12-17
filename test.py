@@ -3,7 +3,7 @@ import torch.nn as nn
 from transformers import (
     AutoTokenizer, AutoModelForSequenceClassification
 )
-from datasets import load_dataset
+from _datasets import load_dataset
 from peft import get_peft_model, LoraConfig, TaskType
 from tqdm import tqdm
 import pandas as pd
