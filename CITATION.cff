@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: "Doe"
+    given-names: "John"
+    affiliation: "University of Example"
+    email: "john.doe@example.com"
+title: "LoRA‑Weighted BERT for Efficient Fine‑Tuning"
+version: "0.1.0"
+date-released: 2025-11-23
+url: "https://github.com/yourusername/label_wise_regularization_lora"
+keywords:
+  - LoRA
+  - BERT
+  - fine‑tuning
+  - low‑rank adaptation
+license: "MIT"
