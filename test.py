@@ -13,6 +13,17 @@ from weighted_lora_module import inject_lora_bert, grad_regularization_bert
 # ⚙️ Utility Functions
 # ============================================================
 def evaluate(model, dataloader, device):
+    """
+    Evaluate the model performance on the given dataloader.
+
+    Args:
+        model (nn.Module): The model to evaluate.
+        dataloader (DataLoader): DataLoader for evaluation data.
+        device (str): Device to run evaluation on.
+
+    Returns:
+        float: Accuracy score.
+    """
     model.eval()
     correct, total = 0, 0
     with torch.no_grad():
@@ -26,6 +37,20 @@ def evaluate(model, dataloader, device):
     return correct / total
 
 def prepare_data(dataset_name, tokenizer, text_key="text", max_length=128, n_train=2000, n_val=500):
+    """
+    Prepare dataset for training and validation.
+
+    Args:
+        dataset_name (str): Name of the dataset to load.
+        tokenizer (PreTrainedTokenizer): Tokenizer to use.
+        text_key (str): Key for the text column in the dataset.
+        max_length (int): Maximum sequence length.
+        n_train (int): Number of training samples to use.
+        n_val (int): Number of validation samples to use.
+
+    Returns:
+        tuple: (train_loader, val_loader, num_labels)
+    """
     dataset = load_dataset(dataset_name)
     if "train" not in dataset:
         dataset = dataset["train"].train_test_split(test_size=0.2)
@@ -46,6 +71,22 @@ def prepare_data(dataset_name, tokenizer, text_key="text", max_length=128, n_tra
     return train_loader, val_loader, len(set(dataset["train"]["label"]))
 
 def finetune_lora(model, train_loader, val_loader, device="cuda", lr=1e-4, epochs=2, lambda_reg=0.01, weighted=False):
+    """
+    Fine-tune the model using LoRA.
+
+    Args:
+        model (nn.Module): The model to fine-tune.
+        train_loader (DataLoader): DataLoader for training data.
+        val_loader (DataLoader): DataLoader for validation data.
+        device (str, optional): Device to run training on. Defaults to "cuda".
+        lr (float, optional): Learning rate. Defaults to 1e-4.
+        epochs (int, optional): Number of epochs. Defaults to 2.
+        lambda_reg (float, optional): Regularization strength for weighted LoRA. Defaults to 0.01.
+        weighted (bool, optional): Whether to use weighted LoRA regularization. Defaults to False.
+
+    Returns:
+        float: Validation accuracy after training.
+    """
     model.to(device)
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
     criterion = nn.CrossEntropyLoss()
@@ -59,6 +100,7 @@ def finetune_lora(model, train_loader, val_loader, device="cuda", lr=1e-4, epoch
             logits = outputs.logits
             loss_task = criterion(logits, labels)
 
+            # Apply gradient regularization if weighted is True
             if weighted:
                 loss_grad = grad_regularization_bert(model, logits, labels)
                 loss = loss_task + lambda_reg * loss_grad
@@ -75,6 +117,7 @@ def finetune_lora(model, train_loader, val_loader, device="cuda", lr=1e-4, epoch
 # ============================================================
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+# List of datasets to test on
 datasets = [
     ("sst2", "text"),
     ("imdb", "text"),
@@ -83,6 +126,7 @@ datasets = [
     ("dbpedia_14", "content"),
 ]
 
+# List of models to test
 models = [
     "bert-base-uncased",
     "roberta-base",

@@ -7,11 +7,18 @@ import torch.nn as nn
 class LoRAWeightedFunction(torch.autograd.Function):
     """
     Custom forward/backward function for LoRA layer.
-    Forward: computes x @ A @ B
-    Backward: scales gradients based on output norm to encourage learning on low-confidence samples.
+    
+    This function implements the core logic of label-wise regularization.
+    In the backward pass, it scales the gradients based on the inverse of the 
+    output norm. This means samples with lower confidence (smaller output norm)
+    will have their gradients scaled up, while high-confidence samples will have
+    smaller gradients.
     """
     @staticmethod
     def forward(ctx, x, A, B, scale_factor=1.0):
+        """
+        Forward pass: computes x @ A @ B
+        """
         ctx.save_for_backward(x, A, B)
         ctx.scale_factor = scale_factor
         out = x @ A @ B
@@ -20,6 +27,9 @@ class LoRAWeightedFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        """
+        Backward pass: computes gradients with sample-wise scaling.
+        """
         x, A, B = ctx.saved_tensors
         out = ctx.out_forward
 
@@ -48,6 +58,13 @@ class LoRAWeightedFunction(torch.autograd.Function):
 # 2️⃣ LoRA Linear Layer
 # -------------------------------
 class LoRABertLinear(nn.Module):
+    """
+    LoRA Linear Layer that replaces a standard nn.Linear layer.
+    
+    It freezes the original weights and adds trainable LoRA matrices A and B.
+    It uses LoRAWeightedFunction for the forward pass of the LoRA path to 
+    enable the gradient scaling logic.
+    """
     def __init__(self, original_linear, r=4, alpha=1.0, scale_factor=1.0, dropout=0.1):
         super().__init__()
         self.in_features = original_linear.in_features
@@ -89,6 +106,18 @@ class LoRABertLinear(nn.Module):
 # 3️⃣ Injection Utility
 # -------------------------------
 def inject_lora_bert(model, r=4, alpha=1.0, scale_factor=1.0, dropout=0.1):
+    """
+    Inject LoRA layers into a BERT-based model.
+    
+    It targets the query, key, and value projection layers in the self-attention mechanism.
+    
+    Args:
+        model (nn.Module): The model to modify.
+        r (int): LoRA rank.
+        alpha (float): LoRA alpha scaling.
+        scale_factor (float): Factor for the weighted gradient scaling.
+        dropout (float): Dropout probability.
+    """
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear) and \
            ('query' in name or 'key' in name or 'value' in name or \
@@ -111,6 +140,20 @@ def inject_lora_bert(model, r=4, alpha=1.0, scale_factor=1.0, dropout=0.1):
 # 4️⃣ Regularization Loss
 # -------------------------------
 def grad_regularization_bert(model, logits, labels):
+    """
+    Compute the gradient regularization loss.
+    
+    This loss penalizes the magnitude of gradients for samples that are correctly classified.
+    The idea is to stabilize the training by reducing updates from easy samples.
+    
+    Args:
+        model (nn.Module): The model.
+        logits (torch.Tensor): Output logits from the model [Batch, NumClasses].
+        labels (torch.Tensor): Ground truth labels [Batch].
+        
+    Returns:
+        torch.Tensor: The scalar regularization loss.
+    """
     preds = logits.argmax(dim=-1)
     correct_mask = preds == labels
     reg_loss = 0.0

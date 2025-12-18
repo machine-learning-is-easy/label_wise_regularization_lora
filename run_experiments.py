@@ -14,10 +14,31 @@ from models import bert_lora, roberta_lora, distilbert_lora
 from lora_utils.modeling import grad_regularization_bert
 
 def load_config(config_path):
+    """
+    Load configuration from a YAML file.
+    
+    Args:
+        config_path (str): Path to the YAML configuration file.
+        
+    Returns:
+        dict: Configuration dictionary.
+    """
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
 def evaluate(model, dataloader, device, is_regression=False):
+    """
+    Evaluate the model on a given dataset.
+    
+    Args:
+        model (nn.Module): The model to evaluate.
+        dataloader (DataLoader): DataLoader for the evaluation dataset.
+        device (str): Device to run the evaluation on ('cuda' or 'cpu').
+        is_regression (bool): Whether the task is regression (True) or classification (False).
+        
+    Returns:
+        float: The evaluation metric (MSE for regression, Accuracy for classification).
+    """
     model.eval()
     total_loss = 0
     correct = 0
@@ -46,6 +67,20 @@ def evaluate(model, dataloader, device, is_regression=False):
     return metric
 
 def train(model, train_loader, val_loader, config, device, is_regression=False):
+    """
+    Train the model.
+    
+    Args:
+        model (nn.Module): The model to train.
+        train_loader (DataLoader): DataLoader for the training dataset.
+        val_loader (DataLoader): DataLoader for the validation dataset.
+        config (dict): Configuration dictionary.
+        device (str): Device to run the training on.
+        is_regression (bool): Whether the task is regression.
+        
+    Returns:
+        float: The best metric achieved on the validation set.
+    """
     model.to(device)
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=float(config['learning_rate']))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['max_epochs'])
@@ -94,7 +129,7 @@ def train(model, train_loader, val_loader, config, device, is_regression=False):
         metric = evaluate(model, val_loader, device, is_regression)
         print(f"Validation {'MSE' if is_regression else 'Acc'}: {metric:.4f}")
         
-        # Save best
+        # Save best model if metric improves
         if is_regression:
             if metric < best_metric:
                 best_metric = metric
@@ -107,6 +142,9 @@ def train(model, train_loader, val_loader, config, device, is_regression=False):
     return best_metric
 
 def main():
+    """
+    Main function to run the experiments.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='config.yaml')
     args = parser.parse_args()
@@ -116,7 +154,7 @@ def main():
     
     os.makedirs("results", exist_ok=True)
     
-    # Define experiments
+    # Define experiments list: (model_name, dataset_name, model_module)
     experiments = [
         ('bert-base-uncased', 'sts_b', bert_lora),
         ('bert-base-uncased', 'mrpc', bert_lora),
@@ -139,7 +177,7 @@ def main():
         
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         
-        # Load Data
+        # Load Data based on dataset name
         if dataset_name == 'sts_b':
             dataset_module = sts_b
             is_regression = True
@@ -155,7 +193,7 @@ def main():
         train_loader = DataLoader(train_data, batch_size=config['batch_size'], shuffle=True)
         val_loader = DataLoader(val_data, batch_size=config['batch_size'])
         
-        # Build Model
+        # Build Model with LoRA
         model = model_module.build_model(
             model_name=model_name,
             num_labels=num_labels,
@@ -165,7 +203,7 @@ def main():
             dropout=config['dropout']
         )
         
-        # Train
+        # Train the model
         metric = train(model, train_loader, val_loader, config, device, is_regression)
         
         results.append({
@@ -175,7 +213,7 @@ def main():
             'type': 'MSE' if is_regression else 'Accuracy'
         })
         
-    # Save results
+    # Save experiment results to a JSON file
     with open('results/experiment_results.json', 'w') as f:
         json.dump(results, f, indent=4)
         

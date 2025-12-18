@@ -3,8 +3,16 @@ import torch
 
 def get_dataset(split, tokenizer, max_length=128):
     """
-    Load STS-B dataset.
-    split: 'train', 'validation', 'test'
+    Load and preprocess the STS-B dataset.
+    
+    Args:
+        split (str): One of 'train', 'validation', 'test'.
+        tokenizer (PreTrainedTokenizer): Tokenizer to process the text.
+        max_length (int): Maximum sequence length.
+        
+    Returns:
+        Dataset: The tokenized dataset with 'input_ids', 'attention_mask', and 'label'.
+                 Labels are converted to floats for regression.
     """
     dataset = load_dataset('glue', 'stsb', split=split)
     

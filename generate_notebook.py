@@ -1,314 +1,101 @@
 import json
+import os
 
-# Strings containing the source code
+"""
+This script generates a self-contained Jupyter Notebook (`experiments_full.ipynb`) for running LoRA experiments.
+It reads the source code from the local Python files and embeds them directly into the notebook cells.
+This ensures the notebook is always up-to-date with the latest code and comments.
+"""
+
+def read_file(path):
+    if not os.path.exists(path):
+        print(f"Warning: File not found: {path}")
+        return ""
+    with open(path, 'r', encoding='utf-8') as f:
+        # Prepend a comment indicating the source
+        return f"# Source: {path}\n" + f.read()
+
 # ---------------------------------------------------------
-modeling_source = r'''
-import torch
-import torch.nn as nn
+# Read Source Code from Files
+# ---------------------------------------------------------
 
-# -------------------------------
-# 1️⃣ LoRA Weighted Function
-# -------------------------------
-class LoRAWeightedFunction(torch.autograd.Function):
-    """
-    Custom forward/backward function for LoRA layer.
-    Forward: computes x @ A @ B
-    Backward: scales gradients based on output norm to encourage learning on low-confidence samples.
-    """
-    @staticmethod
-    def forward(ctx, x, A, B, scale_factor=1.0):
-        ctx.save_for_backward(x, A, B)
-        ctx.scale_factor = scale_factor
-        out = x @ A @ B
-        ctx.out_forward = out.detach()
-        return out
+# Modeling Utils
+modeling_source = read_file('lora_utils/modeling.py')
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        x, A, B = ctx.saved_tensors
-        out = ctx.out_forward
+# Datasets
+datasets_source = read_file('_datasets/mrpc.py') + "\n\n" + \
+                  read_file('_datasets/sts_b.py')
+# We need to adjust dataset functions because in the files they are named `get_dataset`
+# In the notebook we need them to be distinct e.g. `get_dataset_mrpc` and `get_dataset_stsb`
+# or we can keep them as is if we put them in different cells, but the notebook design 
+# in previous steps had them in one block. 
+# Actually, the previous hardcoded strings had `get_dataset_mrpc` and `get_dataset_stsb`.
+# The files `_datasets/mrpc.py` and `sts_b.py` both have `def get_dataset(...)`.
+# If I simply concatenate them, I'll have two `get_dataset` functions and the second will overwrite the first.
+# So I need to rename them or wrap them.
 
-        # Compute per-sample output norm
-        out_norm = torch.norm(out, dim=-1, keepdim=True) + 1e-6
-        weight = ctx.scale_factor / out_norm
-        grad = grad_output * weight
+# Approach: Read and Rename
+def read_and_rename_dataset(path, suffix):
+    content = read_file(path)
+    return content.replace("def get_dataset(", f"def get_dataset_{suffix}(")
 
-        # Sample-level gradients
-        grad_A_sample = x.unsqueeze(2) @ (grad @ B.T).unsqueeze(1)  # [B, D, r]
-        grad_B_sample = (x @ A).unsqueeze(2) * grad.unsqueeze(1)    # [B, r, D]
+datasets_source = read_and_rename_dataset('_datasets/mrpc.py', 'mrpc') + "\n\n" + \
+                  read_and_rename_dataset('_datasets/sts_b.py', 'stsb')
 
-        grad_A = grad_A_sample.sum(dim=0)
-        grad_B = grad_B_sample.sum(dim=0)
-        grad_x = grad @ B @ A.T
 
-        # Save sample-level gradients for regularization
-        # Note: This static storage is not thread-safe or multi-model safe. 
-        # For production, consider attaching to the module instance or context.
-        LoRAWeightedFunction.grad_A_sample = grad_A_sample
-        LoRAWeightedFunction.grad_B_sample = grad_B_sample
+# Models
+# Similarly, models have `build_model`. I need to rename them.
+def read_and_rename_model(path, suffix):
+    content = read_file(path)
+    return content.replace("def build_model(", f"def build_model_{suffix}(")
 
-        return grad_x, grad_A, grad_B, None
+models_source = read_and_rename_model('models/bert_lora.py', 'bert') + "\n\n" + \
+                read_and_rename_model('models/roberta_lora.py', 'roberta') + "\n\n" + \
+                read_and_rename_model('models/distilbert_lora.py', 'distilbert')
 
-# -------------------------------
-# 2️⃣ LoRA Linear Layer
-# -------------------------------
-class LoRABertLinear(nn.Module):
-    def __init__(self, original_linear, r=4, alpha=1.0, scale_factor=1.0, dropout=0.1):
-        super().__init__()
-        self.in_features = original_linear.in_features
-        self.out_features = original_linear.out_features
-        self.r = r
-        self.alpha = alpha
-        self.scale_factor = scale_factor
-        self.scaling = alpha / r
-        
-        # Freeze original weights
-        self.weight = nn.Parameter(original_linear.weight.data.clone())
-        self.weight.requires_grad = False
-        
-        # LoRA parameters
-        self.lora_A = nn.Parameter(torch.randn(self.in_features, r) * 0.01)
-        self.lora_B = nn.Parameter(torch.randn(r, self.out_features) * 0.01)
-        
-        self.dropout = nn.Dropout(p=dropout)
-        
-        # Buffers for gradients
-        self.grad_A_sample = None
-        self.grad_B_sample = None
-        
-        self.lora_A.register_hook(self._save_grad_A)
-        self.lora_B.register_hook(self._save_grad_B)
-
-    def _save_grad_A(self, grad):
-        self.grad_A_sample = grad
-
-    def _save_grad_B(self, grad):
-        self.grad_B_sample = grad
-
-    def forward(self, x):
-        main = x @ self.weight.T
-        lora = LoRAWeightedFunction.apply(x, self.lora_A, self.lora_B, self.scale_factor)
-        return main + self.scaling * self.dropout(lora)
-
-# -------------------------------
-# 3️⃣ Injection Utility
-# -------------------------------
-def inject_lora_bert(model, r=4, alpha=1.0, scale_factor=1.0, dropout=0.1):
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Linear) and \
-           ('query' in name or 'key' in name or 'value' in name or \
-            'q_lin' in name or 'k_lin' in name or 'v_lin' in name):
-            # Handle both BERT and RoBERTa/DistilBERT naming conventions if possible
-            # But strictly speaking, we need to find the parent module.
-            # This simple string split works for standard Transformers models.
-            parent_name = name.rsplit('.', 1)[0]
-            child_name = name.rsplit('.', 1)[1]
-            
-            # Retrieve parent module
-            parent = model
-            for part in parent_name.split('.'):
-                parent = getattr(parent, part)
-            
-            # Replace
-            setattr(parent, child_name, LoRABertLinear(module, r, alpha, scale_factor, dropout))
-
-# -------------------------------
-# 4️⃣ Regularization Loss
-# -------------------------------
-def grad_regularization_bert(model, logits, labels):
-    preds = logits.argmax(dim=-1)
-    correct_mask = preds == labels
-    reg_loss = 0.0
-    count = correct_mask.sum().item()
-    if count == 0:
-        return torch.tensor(0., device=logits.device)
-        
-    for module in model.modules():
-        if isinstance(module, LoRABertLinear) and module.grad_A_sample is not None:
-            # We need to be careful about the batch dimension matching
-            # Assuming grad_A_sample is [B, D, r]
-            if module.grad_A_sample.shape[0] != correct_mask.shape[0]:
-                continue # Skip if shapes don't match (e.g. last batch)
-                
-            mask = correct_mask.view(-1, 1, 1).expand_as(module.grad_A_sample)
-            grad_A_correct = module.grad_A_sample[mask].view(-1, module.r)
-            
-            mask_B = correct_mask.view(-1, 1, 1).expand_as(module.grad_B_sample)
-            grad_B_correct = module.grad_B_sample[mask_B].view(-1, module.lora_B.size(1))
-            
-            reg_loss += (grad_A_correct**2).sum() + (grad_B_correct**2).sum()
-            
-    return reg_loss / count
-'''
-
-datasets_source = r'''
-from datasets import load_dataset
-import torch
-
-def get_dataset_mrpc(split, tokenizer, max_length=128):
-    """
-    Load MRPC dataset.
-    split: 'train', 'validation', 'test'
-    """
-    dataset = load_dataset('glue', 'mrpc', split=split)
+# Train Loop
+# The train loop is in `run_experiments.py`.
+# But `run_experiments.py` has a main function and imports.
+# I want just `evaluate` and `train` functions.
+# I can extract them.
+def extract_train_functions(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
     
-    def tokenize_function(examples):
-        return tokenizer(examples['sentence1'], examples['sentence2'], 
-                         padding='max_length', truncation=True, max_length=max_length)
+    # Simple extraction based on known structure or just copying the whole file but stripping imports/main
+    # For now, let's just grab the functions we know.
+    # But wait, `run_experiments.py` imports `grad_regularization_bert` from `lora_utils`.
+    # In the notebook, `grad_regularization_bert` is already defined in `modeling_source` cell.
+    # So we should remove imports that are satisfied by previous cells.
     
-    tokenized_datasets = dataset.map(tokenize_function, batched=True)
-    tokenized_datasets.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+    content = ""
+    recording = False
     
-    return tokenized_datasets
-
-def get_dataset_stsb(split, tokenizer, max_length=128):
-    """
-    Load STS-B dataset.
-    split: 'train', 'validation', 'test'
-    """
-    dataset = load_dataset('glue', 'stsb', split=split)
+    # Logic: Start recording at `def evaluate` and stop before `def main`?
+    # Or just read the whole file and manually filter lines?
+    # Since I just scrutinized `run_experiments.py`, I know the structure.
+    # `evaluate` starts at line ~20. `train` starts at ~48. `main` starts at ~109.
     
-    def tokenize_function(examples):
-        return tokenizer(examples['sentence1'], examples['sentence2'], 
-                         padding='max_length', truncation=True, max_length=max_length)
-    
-    tokenized_datasets = dataset.map(tokenize_function, batched=True)
-    
-    # STS-B is a regression task, label is float
-    tokenized_datasets = tokenized_datasets.map(lambda x: {'label': float(x['label'])})
-    tokenized_datasets.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
-    
-    return tokenized_datasets
-'''
-
-models_source = r'''
-from transformers import BertForSequenceClassification, RobertaForSequenceClassification, DistilBertForSequenceClassification
-
-def build_model_bert(model_name="bert-base-uncased", num_labels=1, r=4, alpha=1.0, scale_factor=1.0, dropout=0.1):
-    model = BertForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
-    inject_lora_bert(model, r=r, alpha=alpha, scale_factor=scale_factor, dropout=dropout)
-    
-    # Freeze base model parameters
-    for param in model.bert.parameters():
-        param.requires_grad = False
+    captured_lines = []
+    capture = False
+    for line in lines:
+        if line.startswith("def evaluate("):
+            capture = True
+        if line.startswith("def main("):
+            capture = False
         
-    return model
+        if capture:
+            captured_lines.append(line)
+            
+    return "".join(captured_lines)
 
-def build_model_roberta(model_name="roberta-base", num_labels=1, r=4, alpha=1.0, scale_factor=1.0, dropout=0.1):
-    model = RobertaForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
-    inject_lora_bert(model, r=r, alpha=alpha, scale_factor=scale_factor, dropout=dropout)
-    
-    # Freeze base model parameters
-    for param in model.roberta.parameters():
-        param.requires_grad = False
-        
-    return model
+# However, `run_experiments.py` uses `config['lambda_reg']`.
+# In the notebook, `train` expects `config`.
+# It matches. The imports in `run_experiments.py` (like torch, nn, tqdm) need to be present.
+# I'll rely on the imports cell in the notebook.
 
-def build_model_distilbert(model_name="distilbert-base-uncased", num_labels=1, r=4, alpha=1.0, scale_factor=1.0, dropout=0.1):
-    model = DistilBertForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
-    inject_lora_bert(model, r=r, alpha=alpha, scale_factor=scale_factor, dropout=dropout)
-    
-    # Freeze base model parameters
-    for param in model.distilbert.parameters():
-        param.requires_grad = False
-        
-    return model
-'''
+train_source = extract_train_functions('run_experiments.py')
 
-train_source = r'''
-def evaluate(model, dataloader, device, is_regression=False):
-    model.eval()
-    total_loss = 0
-    correct = 0
-    total = 0
-    criterion = nn.MSELoss() if is_regression else nn.CrossEntropyLoss()
-    
-    with torch.no_grad():
-        for batch in dataloader:
-            inputs = {k: v.to(device) for k, v in batch.items() if k != 'label'}
-            labels = batch['label'].to(device)
-            
-            outputs = model(**inputs)
-            logits = outputs.logits.squeeze() if is_regression else outputs.logits
-            
-            loss = criterion(logits, labels)
-            total_loss += loss.item() * len(labels)
-            
-            if not is_regression:
-                preds = logits.argmax(dim=-1)
-                correct += (preds == labels).sum().item()
-            
-            total += len(labels)
-            
-    avg_loss = total_loss / total
-    metric = avg_loss if is_regression else correct / total
-    return metric
-
-def train(model, train_loader, val_loader, config, device, is_regression=False):
-    model.to(device)
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=float(config['learning_rate']))
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['max_epochs'])
-    scaler = torch.cuda.amp.GradScaler()
-    criterion = nn.MSELoss() if is_regression else nn.CrossEntropyLoss()
-    
-    best_metric = float('inf') if is_regression else 0.0
-    
-    for epoch in range(config['max_epochs']):
-        model.train()
-        
-        # Optional: Unfreeze layers
-        if epoch == config.get('unfreeze_layers_after', 999):
-            print(f"Unfreezing last {config.get('unfreeze_layers_count', 2)} layers...")
-            # Logic to unfreeze would go here
-            
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config['max_epochs']}")
-        for batch in pbar:
-            inputs = {k: v.to(device) for k, v in batch.items() if k != 'label'}
-            labels = batch['label'].to(device)
-            
-            optimizer.zero_grad()
-            
-            with torch.cuda.amp.autocast():
-                outputs = model(**inputs)
-                logits = outputs.logits.squeeze() if is_regression else outputs.logits
-                
-                loss_task = criterion(logits, labels)
-                
-                # Gradient regularization (only for classification for now)
-                loss_grad = torch.tensor(0., device=device)
-                if not is_regression and config.get('lambda_reg', 0.0) > 0.0:
-                    try:
-                        loss_grad = grad_regularization_bert(model, outputs.logits, labels)
-                    except Exception as e:
-                        # Fallback if algo is unstable
-                        pass
-                
-                loss = loss_task + float(config['lambda_reg']) * loss_grad
-            
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            
-            pbar.set_postfix({'loss': loss.item()})
-        
-        scheduler.step()
-        
-        # Validation
-        metric = evaluate(model, val_loader, device, is_regression)
-        print(f"Validation {'MSE' if is_regression else 'Acc'}: {metric:.4f}")
-        
-        # Save best
-        if is_regression:
-            if metric < best_metric:
-                best_metric = metric
-                torch.save(model.state_dict(), f"results/best_model_{config['model_name']}_{config['dataset_name']}.pt")
-        else:
-            if metric > best_metric:
-                best_metric = metric
-                torch.save(model.state_dict(), f"results/best_model_{config['model_name']}_{config['dataset_name']}.pt")
-                
-    return best_metric
-'''
 
 # ---------------------------------------------------------
 # Build Notebook
@@ -322,7 +109,8 @@ cells.append({
     "metadata": {},
     "source": [
         "# All-in-One Experiment Runner\n",
-        "This notebook contains all necessary functions and classes to run the LoRA experiments."
+        "This notebook contains all necessary functions and classes to run the LoRA experiments.\n",
+        "The code below is automatically loaded from the project source files."
     ]
 })
 
@@ -341,7 +129,8 @@ cells.append({
         "import json\n",
         "import os\n",
         "from datetime import datetime\n",
-        "from transformers import AutoTokenizer"
+        "from transformers import AutoTokenizer, BertForSequenceClassification, RobertaForSequenceClassification, DistilBertForSequenceClassification\n",
+        "from datasets import load_dataset"
     ]
 })
 
