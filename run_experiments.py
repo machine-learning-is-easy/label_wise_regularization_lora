@@ -11,7 +11,7 @@ from datetime import datetime
 # Import our packages
 from _datasets import sts_b, mrpc
 from models import bert_lora, roberta_lora, distilbert_lora
-from lora_utils.modeling import grad_regularization_bert
+
 
 def load_config(config_path):
     """
@@ -110,12 +110,7 @@ def train(model, train_loader, val_loader, config, device, is_regression=False):
                 
                 loss_task = criterion(logits, labels)
                 
-                # Gradient regularization (only for classification for now)
-                loss_grad = torch.tensor(0., device=device)
-                if not is_regression:
-                    loss_grad = grad_regularization_bert(model, outputs.logits, labels)
-                
-                loss = loss_task + float(config['lambda_reg']) * loss_grad
+                loss = loss_task
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)

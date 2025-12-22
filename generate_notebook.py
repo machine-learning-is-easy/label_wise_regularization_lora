@@ -20,7 +20,7 @@ def read_file(path):
 # ---------------------------------------------------------
 
 # Modeling Utils
-modeling_source = read_file('lora_utils/modeling.py')
+modeling_source = read_file('calora_utils/modeling.py')
 
 # Datasets
 datasets_source = read_file('_datasets/mrpc.py') + "\n\n" + \
@@ -64,9 +64,7 @@ def extract_train_functions(path):
     
     # Simple extraction based on known structure or just copying the whole file but stripping imports/main
     # For now, let's just grab the functions we know.
-    # But wait, `run_experiments.py` imports `grad_regularization_bert` from `lora_utils`.
-    # In the notebook, `grad_regularization_bert` is already defined in `modeling_source` cell.
-    # So we should remove imports that are satisfied by previous cells.
+
     
     content = ""
     recording = False

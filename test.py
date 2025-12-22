@@ -7,7 +7,7 @@ from _datasets import load_dataset
 from peft import get_peft_model, LoraConfig, TaskType
 from tqdm import tqdm
 import pandas as pd
-from weighted_lora_module import inject_lora_bert, grad_regularization_bert
+from calora_utils.modeling import inject_calora_bert
 
 # ============================================================
 # ⚙️ Utility Functions
@@ -100,12 +100,7 @@ def finetune_lora(model, train_loader, val_loader, device="cuda", lr=1e-4, epoch
             logits = outputs.logits
             loss_task = criterion(logits, labels)
 
-            # Apply gradient regularization if weighted is True
-            if weighted:
-                loss_grad = grad_regularization_bert(model, logits, labels)
-                loss = loss_task + lambda_reg * loss_grad
-            else:
-                loss = loss_task
+            loss = loss_task
 
             optimizer.zero_grad()
             loss.backward()
@@ -157,7 +152,7 @@ for model_name in models:
 
         # ---------------- Weighted LoRA ----------------
         custom_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
-        inject_lora_bert(custom_model)
+        inject_calora_bert(custom_model)
         for p in custom_model.base_model.parameters():
             p.requires_grad = False
 
